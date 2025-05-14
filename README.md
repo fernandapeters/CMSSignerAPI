@@ -2,6 +2,7 @@
 
 ## Requirements
 - g++ 9.4.0+
+- OpenSSL 1.1.1f+
 - cmake 3.16.3+
 - conan 2.16.1+
 
@@ -42,6 +43,11 @@ To sign a file:
 ```bash
 curl 'localhost:8080/signature/' \
 --form 'password="your_password";type=multipart/form-data' \
---form 'filename=@"/path/to/file/file_to_sign.txt"' \
---form 'cert=@"/path/to/certifcate/pkcs12/cert.pfx"'
+--form 'filename=@"/path/to/file_to_sign.txt"' \
+--form 'cert=@"/path/to/pkcs12/cert.pfx"'
+```
+To verify a signature:
+```bash
+curl 'localhost:8080/verify/' \
+--form 'signature=@"/path/to/doc_signed.p7s"'
 ```

@@ -3,19 +3,15 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <openssl/cms.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
 #include <openssl/pkcs12.h>
 
 using namespace crypto;
 
-    CMSVerifier::CMSVerifier(std::string pkcs12_path,
-                             std::string pkcs12_password)
-        : cert_path_(pkcs12_path),
-          cert_password_(pkcs12_password),
-          store_(nullptr)
-    {
+    CMSVerifier::CMSVerifier()
+        : store_(nullptr),
+          signatureInfo_("") {
         OpenSSL_add_all_algorithms();
         ERR_load_crypto_strings();
     }
@@ -24,47 +20,22 @@ using namespace crypto;
         if (store_) X509_STORE_free(store_);
     }
 
-    bool CMSVerifier::InitializeTrustStore() {
+    bool CMSVerifier::initializeTrustStore() {
         store_ = X509_STORE_new();
         if (!store_) {
             std::cerr << "Error creating X509 store" << std::endl;
             return false;
         }
-
-        // Load trusted certificates
-        FILE* fp = fopen(cert_path_.c_str(), "r");
-        if (!fp) {
-            std::cerr << "Error opening trusted certificate file" << std::endl;
-            return false;
-        }
-
-        PKCS12* p12 = d2i_PKCS12_fp(fp, NULL);
-        fclose(fp);
-        if (!p12) {
-            std::cerr << "Error reading PKCS12 file" << std::endl;
-            return false;
-        }
-        EVP_PKEY* pkey_ = nullptr;
-        X509* cert = nullptr;
-
-        if (!PKCS12_parse(p12, cert_password_.c_str(), &pkey_, &cert, NULL)) {
-            std::cerr << "Error parsing PKCS12 file (wrong password?)" << std::endl;
-            PKCS12_free(p12);
-            return false;
-        }
-        PKCS12_free(p12);
-
-        if (X509_STORE_add_cert(store_, cert) != 1) {
-            std::cerr << "Error adding certificate to trust store" << std::endl;
-            X509_free(cert);
-            return false;
-        }
-
-        X509_free(cert);
         return true;
     }
 
     bool CMSVerifier::VerifySignature(const std::string& signaturePath) {
+        initializeTrustStore();
+        if (!store_) {
+            std::cerr << "Trust store not initialized" << std::endl;
+            return false;
+        }
+
         auto in = BIO_new_file(signaturePath.c_str(), "rb");
         if (!in) {
             std::cerr << "Error opening signature file" << std::endl;
@@ -85,48 +56,91 @@ using namespace crypto;
             BIO_free(cont);
             return false;
         }
-        std::cout << "Signature verified successfully" << std::endl;
+
+        signatureInfo_ = getSignatureInfo(cms);
+
         BIO_free(in);
         BIO_free(cont);
         CMS_ContentInfo_free(cms);
         return true;
     }
 
-    void CMSVerifier::printCertificateInfo(X509* cert) {
-        std::cout << "\n=== Certificate Information ===" << std::endl;
+    std::string CMSVerifier::getSignatureInfo(CMS_ContentInfo* cms) {
+        if (!cms) {
+            std::cerr << "Invalid CMS content info" << std::endl;
+            return "";
+        }
 
-        // Subject
-        X509_NAME* subject = X509_get_subject_name(cert);
-        std::cout << "Subject: " << nameToString(subject) << std::endl;
+        STACK_OF(X509)* signers = CMS_get0_signers(cms);
+        if (!signers) {
+            std::cerr << "Error retrieving signers from CMS" << std::endl;
+            ERR_print_errors_fp(stderr);
+            return "";
+        }
 
-        // Issuer
-        X509_NAME* issuer = X509_get_issuer_name(cert);
-        std::cout << "Issuer: " << nameToString(issuer) << std::endl;
+        std::string result;
+        for (int i = 0; i < sk_X509_num(signers); ++i) {
+            X509* signer = sk_X509_value(signers, i);
+            result += "Certificate Info:\n";
+            result += "Subject: " + nameToString(X509_get_subject_name(signer)) + "\n";
+            result += "Issuer: " + nameToString(X509_get_issuer_name(signer)) + "\n";
 
-        // Serial Number
-        ASN1_INTEGER* serial = X509_get_serialNumber(cert);
-        BIGNUM* bn = ASN1_INTEGER_to_BN(serial, NULL);
-        char* hex = BN_bn2hex(bn);
-        std::cout << "Serial Number: " << hex << std::endl;
-        OPENSSL_free(hex);
-        BN_free(bn);
+            X509_NAME* subjectName = X509_get_subject_name(signer);
+            int cnIndex = X509_NAME_get_index_by_NID(subjectName, NID_commonName, -1);
+            if (cnIndex >= 0) {
+                X509_NAME_ENTRY* cnEntry = X509_NAME_get_entry(subjectName, cnIndex);
+                ASN1_STRING* cnData = X509_NAME_ENTRY_get_data(cnEntry);
+                result += "Signer Name (CN): " + std::string((char*)ASN1_STRING_get0_data(cnData)) + "\n";
+            }
 
-        // Validity Period
-        ASN1_TIME* not_before = X509_get_notBefore(cert);
-        ASN1_TIME* not_after = X509_get_notAfter(cert);
-        std::cout << "Valid From: " << asn1TimeToString(not_before) << std::endl;
-        std::cout << "Valid Until: " << asn1TimeToString(not_after) << std::endl;
+            const X509_ALGOR* sigAlg = X509_get0_tbs_sigalg(signer);
+            const ASN1_OBJECT* algObj = nullptr;
+            X509_ALGOR_get0(&algObj, nullptr, nullptr, sigAlg);
+            result += "Signature Algorithm: " + std::string(OBJ_nid2ln(OBJ_obj2nid(algObj))) + "\n";
 
-        // Public Key Algorithm
-        int pkey_nid = OBJ_obj2nid(X509_get0_tbs_sigalg(cert)->algorithm);
-        std::cout << "Public Key Algorithm: " << OBJ_nid2ln(pkey_nid) << std::endl;
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            unsigned int hashLen;
+            if (X509_digest(signer, EVP_sha256(), hash, &hashLen)) {
+                result += "Hash: ";
+                for (unsigned int j = 0; j < hashLen; ++j) {
+                    char hexBuffer[3];
+                    sprintf(hexBuffer, "%02x", hash[j]);
+                    result += hexBuffer;
+                }
+                result += "\n";
+            } else {
+                std::cerr << "Error calculating hash" << std::endl;
+            }
 
-        // Signature Algorithm
-        int sig_nid = X509_get_signature_nid(cert);
-        std::cout << "Signature Algorithm: " << OBJ_nid2ln(sig_nid) << std::endl;
+            // Getting signing time
+            ASN1_TIME* signingTime = nullptr;
+            STACK_OF(CMS_SignerInfo)* signersInfo = CMS_get0_SignerInfos(cms);
+            if (signersInfo) {
+                CMS_SignerInfo* signerInfo = sk_CMS_SignerInfo_value(signersInfo, i);
+                if (signerInfo) {
+                    signingTime = (ASN1_TIME*)CMS_signed_get0_data_by_OBJ(
+                        signerInfo, OBJ_nid2obj(NID_pkcs9_signingTime), -3, V_ASN1_UTCTIME);
+                    if (signingTime) {
+                        char timeBuffer[64];
+                        BIO* timeBio = BIO_new(BIO_s_mem());
+                        if (ASN1_TIME_print(timeBio, signingTime)) {
+                            char* timeData;
+                            long timeLen = BIO_get_mem_data(timeBio, &timeData);
+                            result += "Signing Time: " + std::string(timeData, timeLen) + "\n";
+                        } else {
+                            std::cerr << "Error formatting signing time" << std::endl;
+                        }
+                        BIO_free(timeBio);
+                    } else {
+                        std::cerr << "Error retrieving signing time" << std::endl;
+                    }
+                }
+            }
 
-        // Extensions
-        printExtensions(cert);
+        }
+
+        sk_X509_free(signers);
+        return result;
     }
 
     std::string CMSVerifier::nameToString(X509_NAME* name) {
@@ -137,47 +151,5 @@ using namespace crypto;
         std::string result(data, len);
         BIO_free(bio);
         return result;
-    }
-
-    std::string CMSVerifier::asn1TimeToString(ASN1_TIME* time) {
-        BIO* bio = BIO_new(BIO_s_mem());
-        ASN1_TIME_print(bio, time);
-        char* data;
-        long len = BIO_get_mem_data(bio, &data);
-        std::string result(data, len);
-        BIO_free(bio);
-        return result;
-    }
-
-    void CMSVerifier::printExtensions(X509* cert) {
-        std::cout << "\nExtensions:" << std::endl;
-        int count = X509_get_ext_count(cert);
-        for (int i = 0; i < count; i++) {
-            X509_EXTENSION* ext = X509_get_ext(cert, i);
-            ASN1_OBJECT* obj = X509_EXTENSION_get_object(ext);
-
-            char buf[256];
-            OBJ_obj2txt(buf, sizeof(buf), obj, 0);
-            std::string ext_name(buf);
-
-            // Skip some basic extensions for brevity
-            if (ext_name == "X509v3 Subject Key Identifier" ||
-                ext_name == "X509v3 Authority Key Identifier" ||
-                ext_name == "X509v3 Basic Constraints") {
-                continue;
-            }
-
-            std::cout << "- " << ext_name << ": ";
-
-            BIO* bio = BIO_new(BIO_s_mem());
-            if (!X509V3_EXT_print(bio, ext, 0, 0)) {
-                ASN1_STRING_print(bio, X509_EXTENSION_get_data(ext));
-            }
-
-            char* data;
-            long len = BIO_get_mem_data(bio, &data);
-            std::cout << std::string(data, len) << std::endl;
-            BIO_free(bio);
-        }
     }
 

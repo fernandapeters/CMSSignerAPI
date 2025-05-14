@@ -67,14 +67,7 @@ bool CMSSigner::loadKeys() {
     ASN1_STRING* asn1 = X509_NAME_ENTRY_get_data(entry);
     std::string alias(reinterpret_cast<const char*>(ASN1_STRING_get0_data(asn1)),
                 ASN1_STRING_length(asn1));
-/*
-    if (alias != cert_alias_) {
-        std::cerr << "Certificate alias doesn't match" << std::endl;
-        std::cerr << "Found alias: " << alias << std::endl;
-        std::cerr << "Expected alias: " << cert_alias_ << std::endl;
-        return false;
-    }
-*/
+
     store_ = X509_STORE_new();
     if (!store_) {
         std::cerr << "Error creating X509 store" << std::endl;
