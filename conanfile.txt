@@ -1,0 +1,7 @@
+[requires]
+gtest/1.13.0
+poco/1.12.4
+
+[generators]
+CMakeDeps
+CMakeToolchain
