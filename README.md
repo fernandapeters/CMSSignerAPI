@@ -1,4 +1,4 @@
-# BryChallenge
+# CMS Signer API
 
 ## Requirements
 - g++ 9.4.0+
